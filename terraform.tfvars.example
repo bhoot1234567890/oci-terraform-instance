@@ -1,0 +1,4 @@
+compartment_id     = "ocid1.tenancy.oc1..your-tenancy-ocid"
+image_id           = "ocid1.image.oc1.ap-mumbai-1.your-image-ocid"
+subnet_id          = "ocid1.subnet.oc1.ap-mumbai-1.your-subnet-ocid"
+ssh_public_key_path = "~/.ssh/id_ed25519.pub"
