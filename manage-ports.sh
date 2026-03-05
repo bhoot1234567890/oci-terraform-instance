@@ -1,195 +1,221 @@
 #!/bin/bash
-#
 # Port Management Script for OCI Instance
-# Usage: ./manage-ports.sh <command> [port] [protocol] [description]
+# Usage: ./manage-ports.sh <command> [options]
 #
 # Commands:
 #   list     - List all open ports
 #   add      - Add a port (requires port, protocol, description)
 #   remove   - Remove a port (requires port, protocol)
-#
-# Examples:
-#   ./manage-ports.sh list
-#   ./manage-ports.sh add 9000 tcp "Custom service"
-#   ./manage-ports.sh remove 9000 tcp
-
-set -e
 
 SECURITY_LIST_ID="ocid1.securitylist.oc1.ap-mumbai-1.aaaaaaaa2ny4hqd3zsld743nmen47zoxzazoqdokdsm2yhlsdxzb2nalgltq"
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
-
-print_usage() {
-    echo -e "${YELLOW}Port Management Script${NC}"
+show_usage() {
+    echo "Port Management Script"
     echo ""
     echo "Usage: $0 <command> [options]"
     echo ""
     echo "Commands:"
     echo "  list                           List all open ports"
-    echo "  add <port> <proto> <desc>   Add a port"
-    echo "  remove <port> <proto>    Remove a port"
+    echo "  add <port> <proto> <desc>     Add a port (tcp/udp)"
+    echo "  remove <port> <proto>         Remove a port"
     echo ""
     echo "Examples:"
     echo "  $0 list"
-    echo "  $0 add 9000 tcp \"Custom service\""
+    echo "  $0 add 9000 tcp 'Custom service'"
     echo "  $0 remove 9000 tcp"
-}
-
-get_current_rules() {
-    oci network security-list get \
-        --security-list-id "$SECURITY_LIST_ID" \
-        --query 'data."ingress-security-rules"' \
-        --output json
+    exit 1
 }
 
 list_ports() {
-    echo -e "${GREEN}=== OCI Security List Ports ===${NC}"
-    get_current_rules | jq -r '.[] |
-        "\(.description // "Open") as desc,
-        .protocol as proto,
-        .source as source,
-        if .tcp-options.destination-port-range then
-            "\(.tcp-options.destination-port-range.min // "\(.tcp-options.destination-port-range.max)) as port
-        elif .udp-options.destination-port-range then
-            "\(.udp-options.destination-port-range.min // "\(.udp-options.destination-port-range.max)) as port
-        else
-            "N/A"
-        end,
-        "protocol=\(if proto == "1" then "ICMP" elif proto == "6" then "TCP" elif proto == "17" then "UDP" else proto\)"
-    ]' | column -t -s "Description" | "Port" | "Protocol" | "Source"
-    echo -e "|-------------|-------------|----------|--------|"
-    echo -e "${desc:-${port:-${proto:-}"
+    echo "=== OCI Security List Ports ==="
     echo ""
-    echo -e "${GREEN}=== Instance UFW Ports ===${NC}"
-    ssh oci "sudo ufw status numbered" | grep -E '^Status: active' -A1 | while read - line; do
-        port=$(echo "$line" | awk '{print $2}')
-        proto=$(echo "$line" | awk '{print $3}')
-        if [[ -n "$port" && -n "$proto" ]]; then
-            echo -e "$port/$proto"
-        fi
-    done
+    oci network security-list get \
+        --security-list-id "$SECURITY_LIST_ID" \
+        --query 'data."ingress-security-rules"' \
+        --output json 2>/dev/null | python3 -c '
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    for r in data:
+        if r.get("protocol") in ["6", "17"]:
+            desc = r.get("description") or "N/A"
+            proto = "TCP" if r["protocol"] == "6" else "UDP"
+            tcp = r.get("tcp-options", {})
+            udp = r.get("udp-options", {})
+            if tcp and "destination-port-range" in tcp:
+                port = tcp["destination-port-range"].get("min", "N/A")
+            elif udp and "destination-port-range" in udp:
+                port = udp["destination-port-range"].get("min", "N/A")
+            else:
+                port = "N/A"
+            print(f"  {desc:<30} | {proto:<5} | {port:<8}")
+except Exception as e:
+    print(f"Error: {e}")
+' || echo "  Unable to list OCI ports"
+    echo ""
+    echo "=== Instance UFW Ports ==="
+    ssh oci "sudo ufw status numbered 2>/dev/null | head -20" || echo "  Unable to connect to instance"
 }
 
 add_port() {
-    local port=$1
-    local proto=$2
-    local desc=$3
+    local port="$1"
+    local proto="$2"
+    local desc="$3"
 
-    if [[ -z "$port" || -z "$proto" || -z "$desc" ]]; then
-        echo -e "${RED}Error: Port, protocol, and description required${NC}"
+    if [ -z "$port" ] || [ -z "$proto" ] || [ -z "$desc" ]; then
+        echo "Error: Port, protocol, and description required"
         exit 1
     fi
 
     proto_lower=$(echo "$proto" | tr '[:upper:]' '[:lower:]')
-    protocol_num=$([[ "$proto_lower" == "tcp" ]] && echo "6" || echo "17")
+    protocol_num="6"
+    [ "$proto_lower" = "udp" ] && protocol_num="17"
+
+    echo "Adding port $port/$proto to OCI security list..."
 
     # Get current rules
-    current_rules=$(get_current_rules)
+    current=$(oci network security-list get \
+        --security-list-id "$SECURITY_LIST_ID" \
+        --query 'data."ingress-security-rules"' \
+        --output json 2>/dev/null)
 
-    # Build new rule
-    if [[ "$proto_lower" == "tcp" ]]; then
-        new_rule=$(jq -n \
-            --arg protocol "$protocol_num" \
-            --arg port "$port" \
-            --arg desc "$desc" \
-            '. + ($current_rules) + {"protocol": $protocol_num, "source": "0.0.0.0/0", "source-type": "CIDR_BLOCK", "tcp-options": {"destination-port-range": {"min": $port, "max": $port}}, "description": $desc}')
-        '[])
-    else
-        new_rule=$(jq -n \
-            --arg protocol "$protocol_num" \
-            --arg port "$port" \
-            --arg desc "$desc" \
-            '. + ($current_rules) + {"protocol": $protocol_num, "source": "0.0.0.0/0", "source-type": "CIDR_BLOCK", "udp-options": {"destination-port-range": {"min": $port, "max": $port}}, "description": $desc})
-        '[])
+    if [ -z "$current" ]; then
+        echo "Error: Failed to get current rules"
+        exit 1
     fi
 
-    # Update OCI security list
-    echo -e "${YELLOW}Adding port $port/$proto to OCI security list...${NC}"
+    # Build new rules using Python
+    if [ "$proto_lower" = "tcp" ]; then
+        new_rules=$(echo "$current" | python3 -c "
+import sys, json
+rules = json.load(sys.stdin)
+new = {'protocol': '$protocol_num', 'source': '0.0.0.0/1', 'source-type': 'CIDR_BLOCK', 'tcp-options': {'destination-port-range': {'min': $port, 'max': $port}}, 'description': '$desc'}
+rules.append(new)
+print(json.dumps(rules))
+")
+    else
+        new_rules=$(echo "$current" | python3 -c "
+import sys, json
+rules = json.load(sys.stdin)
+new = {'protocol': '$protocol_num', 'source': '0.0.0.0/1', 'source-type': 'CIDR_BLOCK', 'udp-options': {'destination-port-range': {'min': $port, 'max': $port}}, 'description': '$desc'}
+rules.append(new)
+print(json.dumps(rules))
+")
+    fi
+
+    # Update OCI
     oci network security-list update \
         --security-list-id "$SECURITY_LIST_ID" \
-        --ingress-security-rules "$new_rule" \
-        --force > /dev/null
+        --ingress-security-rules "$new_rules" \
+        --force > /dev/null 2>&1
 
-    if [[ $? -eq 0 ]]; then
-        echo -e "${GREEN}✓ OCI security list updated${NC}"
+    if [ $? -eq 0 ]; then
+        echo "✓ OCI updated"
     else
-        echo -e "${RED}✗ Failed to update OCI security list${NC}"
+        echo "✗ OCI update failed"
         exit 1
     fi
 
-    # Update UFW on instance
-    echo -e "${YELLOW}Adding port $port/$proto to instance firewall...${NC}"
-    ssh oci "sudo ufw allow $port/$proto comment '$desc'" > /dev/null
+    # Update UFW
+    echo "Adding port $port/$proto to instance firewall..."
+    ssh oci "sudo ufw allow $port/$proto comment '$desc'" > /dev/null 2>&1
 
-    if [[ $? -eq 0 ]]; then
-        echo -e "${GREEN}✓ Instance firewall updated${NC}"
+    if [ $? -eq 0 ]; then
+        echo "✓ UFW updated"
     else
-        echo -e "${RED}✗ Failed to update instance firewall${NC}"
+        echo "✗ UFW update failed"
         exit 1
     fi
 
-    echo -e "${GREEN}✓ Port $port/$proto added successfully${NC}"
+    echo "✓ Port $port/$proto added"
 }
 
 remove_port() {
-    local port=$1
-    local proto=$2
+    local port="$1"
+    local proto="$2"
 
-    if [[ -z "$port" || -z "$proto" ]]; then
-        echo -e "${RED}Error: Port and protocol required${NC}"
+    if [ -z "$port" ] || [ -z "$proto" ]; then
+        echo "Error: Port and protocol required"
         exit 1
     fi
 
     proto_lower=$(echo "$proto" | tr '[:upper:]' '[:lower:]')
 
-    # Get current rules and filter out the one to remove
-    current_rules=$(get_current_rules)
+    echo "Removing port $port/$proto from OCI security list..."
 
-    if [[ "$proto_lower" == "tcp" ]]; then
-        filtered_rules=$(echo "$current_rules" | jq --arg port "$port" 'del(.[] | select(.tcp-options.destination-port-range.min == $port and .tcp-options.destination-port-range.max == $port)')
+    # Get current rules
+    current=$(oci network security-list get \
+        --security-list-id "$SECURITY_LIST_ID" \
+        --query 'data."ingress-security-rules"' \
+        --output json 2>/dev/null)
+
+    if [ -z "$current" ]; then
+        echo "Error: Failed to get current rules"
+        exit 1
+    fi
+
+    # Remove matching rule using Python
+    if [ "$proto_lower" = "tcp" ]; then
+        new_rules=$(echo "$current" | python3 -c "
+import sys, json
+rules = json.load(sys.stdin)
+filtered = []
+for r in rules:
+    tcp = r.get('tcp-options', {})
+    if tcp and 'destination-port-range' in tcp:
+        min_p = tcp['destination-port-range'].get('min')
+        max_p = tcp['destination-port-range'].get('max')
+        if min_p == $port and max_p == $port:
+            continue
+    filtered.append(r)
+print(json.dumps(filtered))
+")
     else
-        filtered_rules=$(echo "$current_rules" | jq --arg port "$port" 'del(.[] | select(.udp-options.destination-port-range.min == $port and .udp-options.destination-port-range.max == $port)')
+        new_rules=$(echo "$current" | python3 -c "
+import sys, json
+rules = json.load(sys.stdin)
+filtered = []
+for r in rules:
+    udp = r.get('udp-options', {})
+    if udp and 'destination-port-range' in udp:
+        min_p = udp['destination-port-range'].get('min')
+        max_p = udp['destination-port-range'].get('max')
+        if min_p == $port and max_p == $port:
+            continue
+    filtered.append(r)
+print(json.dumps(filtered))
+")
     fi
 
-    if [[ $(echo "$filtered_rules" | jq 'length') -eq 0 ]]; then
-        echo -e "${GREEN}Port $port/$proto not found in OCI security list${NC}"
-        exit 0
-    fi
-
-    # Update OCI security list
-    echo -e "${YELLOW}Removing port $port/$proto from OCI security list...${NC}"
+    # Update OCI
     oci network security-list update \
         --security-list-id "$SECURITY_LIST_ID" \
-        --ingress-security-rules "$filtered_rules" \
-        --force > /dev/null
+        --ingress-security-rules "$new_rules" \
+        --force > /dev/null 2>&1
 
-    if [[ $? -eq 0 ]]; then
-        echo -e "${GREEN}✓ OCI security list updated${NC}"
+    if [ $? -eq 0 ]; then
+        echo "✓ OCI updated"
     else
-        echo -e "${RED}✗ Failed to update OCI security list${NC}"
+        echo "✗ OCI update failed"
         exit 1
     fi
 
-    # Update UFW on instance
-    echo -e "${YELLOW}Removing port $port/$proto from instance firewall...${NC}"
-    ssh oci "sudo ufw delete allow $port/$proto" > /dev/null
+    # Update UFW
+    echo "Removing port $port/$proto from instance firewall..."
+    ssh oci "sudo ufw delete allow $port/$proto" > /dev/null 2>&1
 
-    if [[ $? -eq 0 ]]; then
-        echo -e "${GREEN}✓ Instance firewall updated${NC}"
+    if [ $? -eq 0 ]; then
+        echo "✓ UFW updated"
     else
-        echo -e "${RED}✗ Failed to update instance firewall${NC}"
+        echo "✗ UFW update failed"
         exit 1
     fi
 
-    echo -e "${GREEN}✓ Port $port/$proto removed successfully${NC}"
+    echo "✓ Port $port/$proto removed"
 }
 
 # Main
-case "${1:-" in
+case "${1:-}" in
     list)
         list_ports
         ;;
@@ -200,7 +226,6 @@ case "${1:-" in
         remove_port "$2" "$3"
         ;;
     *)
-        print_usage
-        exit 1
+        show_usage
         ;;
 esac
