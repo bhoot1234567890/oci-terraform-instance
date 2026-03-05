@@ -98,7 +98,7 @@ add_port() {
         new_rules=$(echo "$current" | python3 -c "
 import sys, json
 rules = json.load(sys.stdin)
-new = {'protocol': '$protocol_num', 'source': '0.0.0.0/1', 'source-type': 'CIDR_BLOCK', 'tcp-options': {'destination-port-range': {'min': $port, 'max': $port}}, 'description': '$desc'}
+new = {'protocol': '$protocol_num', 'source': '0.0.0.0/0', 'source-type': 'CIDR_BLOCK', 'tcp-options': {'destination-port-range': {'min': $port, 'max': $port}}, 'description': '$desc'}
 rules.append(new)
 print(json.dumps(rules))
 ")
@@ -106,7 +106,7 @@ print(json.dumps(rules))
         new_rules=$(echo "$current" | python3 -c "
 import sys, json
 rules = json.load(sys.stdin)
-new = {'protocol': '$protocol_num', 'source': '0.0.0.0/1', 'source-type': 'CIDR_BLOCK', 'udp-options': {'destination-port-range': {'min': $port, 'max': $port}, 'description': '$desc'}
+new = {'protocol': '$protocol_num', 'source': '0.0.0.0/0', 'source-type': 'CIDR_BLOCK', 'udp-options': {'destination-port-range': {'min': $port, 'max': $port}}, 'description': '$desc'}
 rules.append(new)
 print(json.dumps(rules))
 ")
