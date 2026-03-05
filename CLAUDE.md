@@ -66,12 +66,16 @@ A1 instances frequently show "Out of host capacity" errors. Mitigations:
 
 Open ports for external access:
 
-| Port  | Protocol | Service           |
-|-------|----------|-------------------|
-| 22    | TCP      | SSH               |
-| 8080  | TCP      | Web Panel         |
-| 25565 | TCP      | Minecraft Java    |
-| 19132 | UDP      | Minecraft Bedrock |
+| Port     | Protocol | Service           | Required For                |
+|---------|----------|-------------------|------------------------------|
+| 22      | TCP      | SSH               | Server management              |
+| 80      | TCP      | HTTP              | Let's Encrypt SSL             |
+| 443     | TCP      | HTTPS             | Pterodactyl Panel             |
+| 8080    | TCP      | Wings API         | Panel ↔ Wings communication   |
+| 8888    | TCP      | Panel             | Pterodactyl Panel             |
+| 2022    | TCP      | SFTP              | File access to servers         |
+| 25565-25570 | TCP      | Minecraft         | Game servers (assign per server) |
+| 19132    | UDP      | Minecraft Bedrock | Bedrock servers                  |
 
 ### OCI Security List (Cloud Firewall)
 
